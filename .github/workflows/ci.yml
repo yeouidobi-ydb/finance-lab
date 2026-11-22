@@ -8,10 +8,10 @@ on:
 permissions:
   contents: read
 
-# 같은 PR에 새 커밋이 오면 이전 실행은 취소한다
+# 같은 PR에 새 커밋이 오면 이전 실행은 취소한다 (main 푸시는 취소하지 않는다)
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # 외부 액션은 태그 대신 커밋 SHA로 고정한다 (태그가 바뀌어도 코드가 바뀌지 않게).
 # 버전 올리기는 .github/dependabot.yml이 PR로 올려 준다.
@@ -65,7 +65,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
+      - name: 캐시할 도구 목록 만들기
+        id: crates
+        run: |
+          # 저장소 루트에는 Cargo.toml이 없으므로 도구 폴더를 하나씩 알려 준다
+          {
+            echo "list<<EOF"
+            for manifest in tools/*/Cargo.toml; do echo "$(dirname "$manifest") -> ../../target"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: ${{ steps.crates.outputs.list }}
       - name: 빌드
         run: |
           for manifest in tools/*/Cargo.toml; do
@@ -86,8 +97,19 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - name: 캐시할 도구 목록 만들기
+        id: crates
+        run: |
+          {
+            echo "list<<EOF"
+            for manifest in tools/*/Cargo.toml; do echo "$(dirname "$manifest") -> ../../target"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: ${{ steps.crates.outputs.list }}
       - name: cargo fmt --check
+        id: fmt
         continue-on-error: true
         run: |
           for manifest in tools/*/Cargo.toml; do
@@ -95,9 +117,24 @@ jobs:
             cargo fmt --manifest-path "$manifest" -- --check
           done
       - name: cargo clippy (경고를 오류로)
+        id: clippy
         continue-on-error: true
         run: |
           for manifest in tools/*/Cargo.toml; do
             echo "== $manifest"
             cargo clippy --manifest-path "$manifest" -- -D warnings
           done
+      - name: 결과 요약 (실패해도 머지는 막지 않음)
+        if: always()
+        run: |
+          if [ "${{ steps.fmt.outcome }}" = "failure" ]; then
+            echo "::warning title=Rust 스타일::cargo fmt --check 실패. 'cargo fmt'로 맞춰 주세요."
+          fi
+          if [ "${{ steps.clippy.outcome }}" = "failure" ]; then
+            echo "::warning title=Rust 스타일::cargo clippy 경고가 있습니다."
+          fi
+          {
+            echo "### Rust 스타일 (참고)"
+            echo "- cargo fmt --check: ${{ steps.fmt.outcome }}"
+            echo "- cargo clippy -D warnings: ${{ steps.clippy.outcome }}"
+          } >> "$GITHUB_STEP_SUMMARY"

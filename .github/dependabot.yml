@@ -8,7 +8,9 @@ updates:
       day: monday
       timezone: Asia/Seoul
   - package-ecosystem: cargo
-    directory: /tools/krx_schedule
+    # 도구마다 Cargo.toml이 따로 있다. 새 도구도 자동으로 포함된다.
+    directories:
+      - /tools/*
     schedule:
       interval: weekly
       day: monday
