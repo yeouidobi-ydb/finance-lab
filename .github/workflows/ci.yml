@@ -45,6 +45,14 @@ jobs:
             python -c "import sys; sys.path.insert(0, '$dir'); import $name" || exit 1
             echo "ok: $name"
           done
+      - name: 테스트 (tools/<name>/test_*.py, 네트워크 호출 없음)
+        run: |
+          for dir in tools/*/; do
+            if ls "$dir"test_*.py >/dev/null 2>&1; then
+              echo "== $dir"
+              python -m unittest discover -s "$dir" -p 'test_*.py' -v || exit 1
+            fi
+          done
 
   rust:
     name: Rust
@@ -62,3 +70,27 @@ jobs:
             echo "== $manifest"
             cargo build --manifest-path "$manifest"
           done
+      - name: 테스트 (네트워크 호출 없음)
+        run: |
+          for manifest in tools/*/Cargo.toml; do
+            echo "== $manifest"
+            cargo test --manifest-path "$manifest"
+          done
+      - name: krx_schedule 저장 파일 Python ↔ Rust 주고받기 확인
+        working-directory: tools/krx_schedule
+        run: |
+          py_dir=$(mktemp -d)
+          rs_dir=$(mktemp -d)
+
+          echo "== Python이 쓰고 Rust가 읽기"
+          KRX_ROUNDTRIP_WRITE="$py_dir" python3 -m unittest -v test_krx_schedule.RoundTripTest.test_write_for_rust
+          test -f "$py_dir/krx_holidays_2026.json"
+          KRX_ROUNDTRIP_READ="$py_dir" cargo test -- --ignored --exact tests::roundtrip_read_from_python | tee out.txt
+          grep -q "test result: ok. 1 passed" out.txt
+
+          echo "== Rust가 쓰고 Python이 읽기"
+          KRX_ROUNDTRIP_WRITE="$rs_dir" cargo test -- --ignored --exact tests::roundtrip_write_for_python | tee out.txt
+          grep -q "test result: ok. 1 passed" out.txt
+          test -f "$rs_dir/krx_holidays_2026.json"
+          KRX_ROUNDTRIP_READ="$rs_dir" python3 -m unittest -v test_krx_schedule.RoundTripTest.test_read_from_rust 2>&1 | tee out.txt
+          grep -q "^OK$" out.txt
