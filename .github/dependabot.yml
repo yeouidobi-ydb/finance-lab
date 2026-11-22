@@ -1,0 +1,15 @@
+# 의존성 버전 올리기 PR을 자동으로 연다. 머지는 사람이 결정한다.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Seoul
+  - package-ecosystem: cargo
+    directory: /tools/krx_schedule
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Seoul
