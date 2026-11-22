@@ -76,14 +76,27 @@ def fetch_holidays(year: int) -> list[dict[str, str]]:
     if not holidays:
         raise KrxError(f"{year}년 휴장일 목록이 비어 있음 (조회 실패 가능성)")
     # 저장본을 Rust와 같이 쓰므로 세 필드만 문자열로 남긴다.
-    return [
+    normalized = [
         {
             "calnd_dd": str(h.get("calnd_dd") or ""),
             "kr_dy_tp": str(h.get("kr_dy_tp") or ""),
             "holdy_nm": str(h.get("holdy_nm") or ""),
         }
         for h in holidays
+        if isinstance(h, dict)
     ]
+    # 날짜가 비었거나 다른 해 날짜가 섞이면 응답을 믿지 않는다 (기존 저장본도 덮어쓰지 않음).
+    bad = [h for h in normalized if not valid_holiday_date(h["calnd_dd"], year)]
+    if bad or len(normalized) != len(holidays):
+        raise KrxError(f"{year}년 휴장일 응답에 이상한 항목이 있음: {(bad or holidays)[:3]!r}")
+    return normalized
+
+
+def valid_holiday_date(value: str, year: int) -> bool:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").year == year and len(value) == 10
+    except ValueError:
+        return False
 
 
 def data_dir() -> Path:
@@ -132,7 +145,7 @@ def load_cache(year: int) -> dict[str, object] | None:
         or not all(
             isinstance(h, dict)
             and all(isinstance(h.get(k), str) for k in ("calnd_dd", "kr_dy_tp", "holdy_nm"))
-            and h["calnd_dd"].startswith(f"{year}-")
+            and valid_holiday_date(h["calnd_dd"], year)
             for h in holidays
         )
     ):
@@ -140,13 +153,21 @@ def load_cache(year: int) -> dict[str, object] | None:
     return cache
 
 
-def get_holidays(year: int) -> tuple[list[dict[str, str]], str, bool]:
-    """(휴장일 목록, 받은 시각, 이번에 새로 받았는지). 저장본이 없을 때만 KRX에 묻는다."""
+def get_holidays(year: int) -> tuple[list[dict[str, str]], str, str]:
+    """(휴장일 목록, 받은 시각, 출처 설명). 저장본이 없을 때만 KRX에 묻는다.
+
+    올해(KST)보다 뒤의 연도는 KRX가 확정 전 달력(연말휴장일 등이 빠짐)을 주므로
+    저장하지 않고 그때그때 받아서 쓴다. 저장하려면 --update <연도>를 직접 돌린다.
+    """
     cache = load_cache(year)
-    fetched_now = cache is None
-    if cache is None:
-        cache = save_holidays(year, fetch_holidays(year))
-    return cache["holidays"], cache["fetched_at"], fetched_now  # type: ignore[return-value]
+    if cache is not None:
+        return cache["holidays"], cache["fetched_at"], "저장본 사용"  # type: ignore[return-value]
+    holidays = fetch_holidays(year)
+    if year > datetime.now(KST).year:
+        fetched_at = datetime.now(KST).isoformat(timespec="seconds")
+        return holidays, fetched_at, "다음 해 이후라 저장 안 함 · 확정 전일 수 있음"
+    cache = save_holidays(year, holidays)
+    return cache["holidays"], cache["fetched_at"], "방금 새로 받아 저장"  # type: ignore[return-value]
 
 
 def fetch_notices(pages: int = 1) -> list[dict[str, str]]:
@@ -262,7 +283,7 @@ def main() -> int:
         return 2
 
     try:
-        holidays, fetched_at, fetched_now = get_holidays(target.year)
+        holidays, fetched_at, data_note = get_holidays(target.year)
         notices = fetch_notices(pages=1)
     except (KrxError, OSError) as e:
         print(f"[오류] KRX 조회 실패: {e}", file=sys.stderr)
@@ -274,7 +295,7 @@ def main() -> int:
     print(f"- 판정: {status['verdict']}")
     print(f"- 주말 여부: {status['is_weekend']}")
     print(f"- 공식 휴장일: {h['holdy_nm'] + ' (' + h['kr_dy_tp'] + ')' if h else '없음'}")
-    print(f"- 휴장일 데이터: {fetched_at[:10]} 받음 ({'방금 새로 받아 저장' if fetched_now else '저장본 사용'})")
+    print(f"- 휴장일 데이터: {fetched_at[:10]} 받음 ({data_note})")
     print(f"- 참고 공지 · 공매도 모의거래 게시판 ({len(status['notices'])}건):")
     for n in status["notices"]:
         print(f"  * [{n['posted_at']}] {n['title']} ({n['url']})")

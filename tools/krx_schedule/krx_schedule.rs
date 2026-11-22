@@ -122,7 +122,7 @@ fn fetch_holidays(client: &Client, year: i32) -> Result<Vec<Holiday>, Box<dyn Er
         return Err(format!("{year}년 휴장일 목록이 비어 있음 (조회 실패 가능성)").into());
     }
     // 저장본을 Python과 같이 쓰므로 세 필드만 문자열로 남긴다.
-    Ok(resp
+    let holidays: Vec<Holiday> = resp
         .block1
         .into_iter()
         .map(|h| Holiday {
@@ -130,7 +130,22 @@ fn fetch_holidays(client: &Client, year: i32) -> Result<Vec<Holiday>, Box<dyn Er
             kr_dy_tp: h.kr_dy_tp.unwrap_or_default(),
             holdy_nm: h.holdy_nm.unwrap_or_default(),
         })
-        .collect())
+        .collect();
+    // 날짜가 비었거나 다른 해 날짜가 섞이면 응답을 믿지 않는다 (기존 저장본도 덮어쓰지 않음).
+    let bad: Vec<&Holiday> = holidays
+        .iter()
+        .filter(|h| !valid_holiday_date(&h.calnd_dd, year))
+        .take(3)
+        .collect();
+    if !bad.is_empty() {
+        return Err(format!("{year}년 휴장일 응답에 이상한 항목이 있음: {bad:?}").into());
+    }
+    Ok(holidays)
+}
+
+fn valid_holiday_date(value: &str, year: i32) -> bool {
+    value.len() == 10
+        && NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok_and(|d| d.year() == year)
 }
 
 fn data_dir() -> PathBuf {
@@ -154,16 +169,20 @@ fn today_kst() -> NaiveDate {
     now_kst().date_naive()
 }
 
-fn save_holidays(year: i32, holidays: Vec<Holiday>) -> Result<HolidayCache, Box<dyn Error>> {
-    if holidays.is_empty() {
-        return Err(format!("{year}년 휴장일 목록이 비어 있어 저장하지 않음").into());
-    }
-    let cache = HolidayCache {
+fn new_cache(year: i32, holidays: Vec<Holiday>) -> HolidayCache {
+    HolidayCache {
         year,
         fetched_at: now_kst().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
         source: HOLIDAY_URL.to_string(),
         holidays,
-    };
+    }
+}
+
+fn save_holidays(year: i32, holidays: Vec<Holiday>) -> Result<HolidayCache, Box<dyn Error>> {
+    if holidays.is_empty() {
+        return Err(format!("{year}년 휴장일 목록이 비어 있어 저장하지 않음").into());
+    }
+    let cache = new_cache(year, holidays);
     let path = cache_path(year);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -189,10 +208,12 @@ fn load_cache(year: i32) -> Result<Option<HolidayCache>, Box<dyn Error>> {
     let raw = fs::read_to_string(&path).map_err(|e| unreadable(&e))?;
     let cache: HolidayCache = serde_json::from_str(&raw).map_err(|e| unreadable(&e))?;
 
-    let prefix = format!("{year}-");
     if cache.year != year
         || cache.holidays.is_empty()
-        || !cache.holidays.iter().all(|h| h.calnd_dd.starts_with(&prefix))
+        || !cache
+            .holidays
+            .iter()
+            .all(|h| valid_holiday_date(&h.calnd_dd, year))
     {
         return Err(format!(
             "휴장일 저장본 형식이 이상함 ({}) — --update {year} 로 다시 받으세요",
@@ -203,12 +224,25 @@ fn load_cache(year: i32) -> Result<Option<HolidayCache>, Box<dyn Error>> {
     Ok(Some(cache))
 }
 
-/// (저장본, 이번에 새로 받았는지). 저장본이 없을 때만 KRX에 묻는다.
-fn get_holidays(client: &Client, year: i32) -> Result<(HolidayCache, bool), Box<dyn Error>> {
-    match load_cache(year)? {
-        Some(cache) => Ok((cache, false)),
-        None => Ok((save_holidays(year, fetch_holidays(client, year)?)?, true)),
+/// (휴장일 데이터, 출처 설명). 저장본이 없을 때만 KRX에 묻는다.
+///
+/// 올해(KST)보다 뒤의 연도는 KRX가 확정 전 달력(연말휴장일 등이 빠짐)을 주므로
+/// 저장하지 않고 그때그때 받아서 쓴다. 저장하려면 --update <연도>를 직접 돌린다.
+fn get_holidays(
+    client: &Client,
+    year: i32,
+) -> Result<(HolidayCache, &'static str), Box<dyn Error>> {
+    if let Some(cache) = load_cache(year)? {
+        return Ok((cache, "저장본 사용"));
     }
+    let holidays = fetch_holidays(client, year)?;
+    if year > now_kst().year() {
+        return Ok((
+            new_cache(year, holidays),
+            "다음 해 이후라 저장 안 함 · 확정 전일 수 있음",
+        ));
+    }
+    Ok((save_holidays(year, holidays)?, "방금 새로 받아 저장"))
 }
 
 fn fetch_notices(client: &Client, pages: usize) -> Result<Vec<Notice>, Box<dyn Error>> {
@@ -286,7 +320,7 @@ fn run_update(year: i32) -> Result<(), Box<dyn Error>> {
 
 fn run_check(target: NaiveDate) -> Result<(), Box<dyn Error>> {
     let client = build_client()?;
-    let (cache, fetched_now) = get_holidays(&client, target.year())?;
+    let (cache, data_note) = get_holidays(&client, target.year())?;
     let holidays = &cache.holidays;
     let notices = fetch_notices(&client, 1)?;
 
@@ -318,11 +352,7 @@ fn run_check(target: NaiveDate) -> Result<(), Box<dyn Error>> {
     println!(
         "- 휴장일 데이터: {} 받음 ({})",
         cache.fetched_at.get(..10).unwrap_or(&cache.fetched_at),
-        if fetched_now {
-            "방금 새로 받아 저장"
-        } else {
-            "저장본 사용"
-        }
+        data_note
     );
     println!(
         "- 참고 공지 · 공매도 모의거래 게시판 ({}건):",
