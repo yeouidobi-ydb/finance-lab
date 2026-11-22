@@ -2,7 +2,8 @@
 """
 KRX 휴장일 및 장운영 관련 공지 조회 스크립트 (표준 라이브러리 전용)
 - 휴장일: open.krx.co.kr GenerateOTP + OPN99000001.jspx
-  연도별로 한 번 받아 data/krx_holidays_<연도>.json 에 저장하고, 이후에는 저장본을 쓴다.
+  연도별로 받아 data/krx_holidays_<연도>.json 에 저장하고, 이후에는 저장본을 쓴다.
+  올해 이후 연도의 저장본은 매주 월·목 0시(KST)가 지나면 처음 조회할 때 다시 받는다.
   (Rust 버전과 같은 파일을 같이 쓴다. 위치는 KRX_SCHEDULE_DATA_DIR 로 바꿀 수 있다.)
 - 참고 공지: strn.krx.co.kr/corebbs5/BHPSTRN0401/list
   주의: 이 게시판은 'KRX 개인 공매도 모의거래인증시스템' 게시판이다.
@@ -21,6 +22,7 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -65,13 +67,19 @@ def fetch_holidays(year: int) -> list[dict[str, str]]:
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         raw = resp.read().decode("utf-8")
+    return parse_holidays(raw, year)
 
+
+def parse_holidays(raw: str, year: int) -> list[dict[str, str]]:
+    """KRX 휴장일 응답(JSON 문자열)을 저장 형식으로 바꾼다. 이상하면 KrxError."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         raise KrxError(f"휴장일 응답이 JSON이 아님: {raw[:200]!r}") from e
 
-    holidays = data.get("block1")
+    holidays = data.get("block1") if isinstance(data, dict) else None
+    if holidays is not None and not isinstance(holidays, list):
+        raise KrxError(f"휴장일 응답 형식이 이상함: {raw[:200]!r}")
     # 매년 최소 신정·연말휴장일이 있으므로 비어 있으면 조회 실패로 본다.
     if not holidays:
         raise KrxError(f"{year}년 휴장일 목록이 비어 있음 (조회 실패 가능성)")
@@ -99,25 +107,63 @@ def valid_holiday_date(value: str, year: int) -> bool:
         return False
 
 
+# fetched_at 은 "2026-11-22T21:43:32+09:00" 형식만 받는다 (Rust와 같은 규칙).
+FETCHED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}")
+
+
+def parse_fetched_at(value: object) -> datetime | None:
+    if not isinstance(value, str) or not FETCHED_AT_RE.fullmatch(value):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def last_refresh_point(now: datetime) -> datetime:
+    """now 이전(같은 시각 포함)의 가장 가까운 월요일 또는 목요일 0시 (KST)."""
+    now_kst = now.astimezone(KST)
+    days_back = (0, 1, 2, 0, 1, 2, 3)[now_kst.weekday()]  # 월=0 … 일=6
+    day = now_kst.date() - timedelta(days=days_back)
+    return datetime(day.year, day.month, day.day, tzinfo=KST)
+
+
+def needs_refresh(year: int, fetched_at: datetime, now: datetime) -> bool:
+    """저장본을 다시 받아야 하는지.
+
+    - 올해 이후 연도: 마지막 월·목 0시(KST)보다 전에 받았으면 다시 받는다.
+      (해 중간에 정해지는 임시공휴일·선거일을 늦어도 3~4일 안에 반영)
+    - 지난 연도: 그 해가 끝나기 전에 받았으면 한 번 더 받는다. 그 뒤로는 바뀌지 않는다.
+    """
+    if year < now.astimezone(KST).year:
+        return fetched_at < datetime(year + 1, 1, 1, tzinfo=KST)
+    return fetched_at < last_refresh_point(now)
+
+
 def data_dir() -> Path:
     override = os.environ.get(DATA_DIR_ENV)
     return Path(override) if override else Path(__file__).resolve().parent / "data"
 
 
-def cache_path(year: int) -> Path:
-    return data_dir() / f"krx_holidays_{year}.json"
+def cache_path(year: int, directory: Path | None = None) -> Path:
+    return (directory if directory is not None else data_dir()) / f"krx_holidays_{year}.json"
 
 
-def save_holidays(year: int, holidays: list[dict[str, str]]) -> dict[str, object]:
+def save_holidays(
+    year: int,
+    holidays: list[dict[str, str]],
+    directory: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
     if not holidays:
         raise KrxError(f"{year}년 휴장일 목록이 비어 있어 저장하지 않음")
     cache = {
         "year": year,
-        "fetched_at": datetime.now(KST).isoformat(timespec="seconds"),
+        "fetched_at": (now or datetime.now(KST)).astimezone(KST).isoformat(timespec="seconds"),
         "source": HOLIDAY_URL,
         "holidays": holidays,
     }
-    path = cache_path(year)
+    path = cache_path(year, directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     # 임시 파일은 프로세스마다 다른 이름 (Python·Rust를 동시에 돌려도 서로 덮어쓰지 않게)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -130,9 +176,9 @@ def save_holidays(year: int, holidays: list[dict[str, str]]) -> dict[str, object
     return cache
 
 
-def load_cache(year: int) -> dict[str, object] | None:
+def load_cache(year: int, directory: Path | None = None) -> dict[str, object] | None:
     """저장본이 없으면 None. 있는데 이상하면 오류로 멈춘다."""
-    path = cache_path(year)
+    path = cache_path(year, directory)
     if not path.exists():
         return None
     try:
@@ -143,8 +189,9 @@ def load_cache(year: int) -> dict[str, object] | None:
     holidays = cache.get("holidays") if isinstance(cache, dict) else None
     if (
         not isinstance(cache, dict)
-        or cache.get("year") != year
-        or not isinstance(cache.get("fetched_at"), str)
+        or type(cache.get("year")) is not int
+        or cache["year"] != year
+        or parse_fetched_at(cache.get("fetched_at")) is None
         or not isinstance(holidays, list)
         or not holidays
         or not all(
@@ -158,21 +205,42 @@ def load_cache(year: int) -> dict[str, object] | None:
     return cache
 
 
-def get_holidays(year: int) -> tuple[list[dict[str, str]], str, str]:
-    """(휴장일 목록, 받은 시각, 출처 설명). 저장본이 없을 때만 KRX에 묻는다.
+NOTE_CACHED = "저장본 사용"
+NOTE_NEW = "방금 새로 받아 저장"
+NOTE_REFRESHED = "저장본이 오래돼 다시 받아 저장"
+NOTE_PREVIEW = "다음 해 이후라 저장 안 함 · 확정 전일 수 있음"
 
-    올해(KST)보다 뒤의 연도는 KRX가 확정 전 달력(연말휴장일 등이 빠짐)을 주므로
-    저장하지 않고 그때그때 받아서 쓴다. 저장하려면 --update <연도>를 직접 돌린다.
+
+def get_holidays(
+    year: int,
+    *,
+    fetcher: Callable[[int], list[dict[str, str]]] | None = None,
+    directory: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, str]], str, str]:
+    """(휴장일 목록, 받은 시각, 출처 설명).
+
+    - 저장본이 있고 오래되지 않았으면(needs_refresh) 그대로 쓴다.
+    - 오래됐으면 다시 받아 저장한다. 다시 받기에 실패하면 오래된 목록으로 넘기지 않고 오류로 멈춘다.
+    - 저장본이 없으면 받아서 저장한다. 단 올해(KST)보다 뒤의 연도는 KRX가 확정 전 달력
+      (연말휴장일 등이 빠짐)을 주므로 저장하지 않는다. 저장하려면 --update <연도>를 직접 돌린다.
     """
-    cache = load_cache(year)
+    fetch = fetcher or fetch_holidays
+    now = (now or datetime.now(KST)).astimezone(KST)
+    cache = load_cache(year, directory)
     if cache is not None:
-        return cache["holidays"], cache["fetched_at"], "저장본 사용"  # type: ignore[return-value]
-    holidays = fetch_holidays(year)
-    if year > datetime.now(KST).year:
-        fetched_at = datetime.now(KST).isoformat(timespec="seconds")
-        return holidays, fetched_at, "다음 해 이후라 저장 안 함 · 확정 전일 수 있음"
-    cache = save_holidays(year, holidays)
-    return cache["holidays"], cache["fetched_at"], "방금 새로 받아 저장"  # type: ignore[return-value]
+        fetched_at = parse_fetched_at(cache["fetched_at"])
+        assert fetched_at is not None  # load_cache 에서 확인함
+        if not needs_refresh(year, fetched_at, now):
+            return cache["holidays"], cache["fetched_at"], NOTE_CACHED  # type: ignore[return-value]
+        cache = save_holidays(year, fetch(year), directory, now)
+        return cache["holidays"], cache["fetched_at"], NOTE_REFRESHED  # type: ignore[return-value]
+
+    holidays = fetch(year)
+    if year > now.year:
+        return holidays, now.isoformat(timespec="seconds"), NOTE_PREVIEW
+    cache = save_holidays(year, holidays, directory, now)
+    return cache["holidays"], cache["fetched_at"], NOTE_NEW  # type: ignore[return-value]
 
 
 def fetch_notices(pages: int = 1) -> list[dict[str, str]]:
