@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  structure:
+    name: 도구 구성 확인 (Python + Rust 짝)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tools/<name>/ 마다 <name>.py, <name>.rs, Cargo.toml, README.md가 있는지 확인
+        run: |
+          status=0
+          for dir in tools/*/; do
+            name=$(basename "$dir")
+            for f in "$name.py" "$name.rs" Cargo.toml README.md; do
+              if [ ! -f "$dir$f" ]; then
+                echo "::error file=$dir::$dir$f 가 없습니다"
+                status=1
+              fi
+            done
+          done
+          exit $status
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 문법 확인
+        run: python -m compileall -q tools
+      - name: 표준 라이브러리만으로 import 되는지 확인 (네트워크 호출 없음)
+        run: |
+          for dir in tools/*/; do
+            name=$(basename "$dir")
+            python -c "import sys; sys.path.insert(0, '$dir'); import $name" || exit 1
+            echo "ok: $name"
+          done
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    env:
+      # 모든 도구가 저장소 루트의 target/ 하나를 같이 쓴다 (캐시 공유)
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 빌드
+        run: |
+          for manifest in tools/*/Cargo.toml; do
+            echo "== $manifest"
+            cargo build --manifest-path "$manifest"
+          done
