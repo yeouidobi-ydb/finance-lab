@@ -1,7 +1,8 @@
 # krx_schedule
 
 특정 날짜가 KRX 휴장일인지 조회하고, 그 날짜가 들어간 공지를 함께 보여 준다.
-Python과 Rust 버전이 같은 결과를 출력한다.
+휴장일 목록은 **연도별로 한 번 받아 저장**해 두고, 이후 조회는 저장본으로 한다.
+Python과 Rust 버전이 같은 결과를 출력하고, 같은 저장 파일을 같이 쓴다.
 
 ## 실행
 
@@ -13,7 +14,29 @@ python krx_schedule.py 2026-12-25
 cargo run --release -- 2026-12-25
 ```
 
-날짜를 생략하면 오늘(KST)을 조회한다. 다른 Python 스크립트에서는 `from krx_schedule import is_trading_day`로 쓸 수 있다.
+날짜를 생략하면 오늘(KST)을 조회한다. 다른 Python 스크립트에서는 `from krx_schedule import is_trading_day`로 쓸 수 있다(같은 저장본을 쓴다).
+
+## 휴장일 연간 저장
+
+```bash
+python krx_schedule.py --update        # 올해(KST) 휴장일을 받아 저장본 교체
+python krx_schedule.py --update 2027   # 특정 연도
+cargo run --release -- --update 2027   # Rust도 같다
+```
+
+- 저장 위치: `tools/krx_schedule/data/krx_holidays_<연도>.json` (`data/`는 `.gitignore`에 있어 커밋되지 않음)
+  - 환경 변수 `KRX_SCHEDULE_DATA_DIR`로 위치를 바꿀 수 있다.
+- 날짜를 조회할 때 그 해 저장본이 없으면 자동으로 받아 저장한다. 그래서 따로 예약하지 않아도 해마다 처음 조회할 때 한 번 받게 된다.
+- 저장본에는 받은 시각(`fetched_at`, KST)이 들어 있고, 조회 결과에 `- 휴장일 데이터: <날짜> 받음 (저장본 사용)`으로 표시된다.
+- 저장본이 깨졌거나 비었거나 연도가 안 맞으면 "휴장일 없음"으로 넘기지 않고 오류(종료 코드 1)로 멈춘다. `--update`로 다시 받으면 된다.
+- KRX가 빈 목록을 주면 저장하지 않는다(기존 저장본 유지).
+
+### 언제 `--update`를 돌려야 하나
+
+연초에 한 번 받은 저장본은 **그 뒤에 추가된 휴장일을 모른다.** 선거일·임시공휴일(예: 2026-06-03 임시공휴일)처럼 해 중간에 정해지는 휴장일이 생기면 저장본은 그날을 "개장"으로 판정하고, 오류도 나지 않는다.
+
+- 임시공휴일·선거일 지정 소식이 있으면 `--update`를 돌린다.
+- 다음 해 휴장일은 KRX가 보통 12월에 공개하므로, 12월에 `--update <다음 해>`로 미리 받아 둔다.
 
 ## 출력 판정
 
