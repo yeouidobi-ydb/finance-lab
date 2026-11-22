@@ -1,0 +1,30 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 데이터·결과물 (코드만 올리고 데이터는 올리지 않음)
+data/
+output/
+*.xlsx
+*.xls
+*.csv
+*.parquet
+*.docx
+
+# 비밀값
+.env
+.env.*
+*.key
+secrets*
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
