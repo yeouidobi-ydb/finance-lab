@@ -119,9 +119,14 @@ def save_holidays(year: int, holidays: list[dict[str, str]]) -> dict[str, object
     }
     path = cache_path(year)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)  # 쓰다 끊겨도 기존 저장본이 깨지지 않게
+    # 임시 파일은 프로세스마다 다른 이름 (Python·Rust를 동시에 돌려도 서로 덮어쓰지 않게)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)  # 쓰다 끊겨도 기존 저장본이 깨지지 않게
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return cache
 
 

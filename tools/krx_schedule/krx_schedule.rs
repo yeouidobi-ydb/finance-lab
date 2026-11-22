@@ -187,9 +187,17 @@ fn save_holidays(year: i32, holidays: Vec<Holiday>) -> Result<HolidayCache, Box<
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_file_name(format!("krx_holidays_{year}.json.tmp"));
-    fs::write(&tmp, serde_json::to_string_pretty(&cache)? + "\n")?;
-    fs::rename(&tmp, &path)?; // 쓰다 끊겨도 기존 저장본이 깨지지 않게
+    // 임시 파일은 프로세스마다 다른 이름 (Python·Rust를 동시에 돌려도 서로 덮어쓰지 않게)
+    let tmp = path.with_file_name(format!(
+        "krx_holidays_{year}.json.{}.tmp",
+        std::process::id()
+    ));
+    let json = serde_json::to_string_pretty(&cache)? + "\n";
+    // 쓰다 끊겨도 기존 저장본이 깨지지 않게 임시 파일에 쓰고 바꿔 끼운다
+    if let Err(e) = fs::write(&tmp, json).and_then(|()| fs::rename(&tmp, &path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(cache)
 }
 
